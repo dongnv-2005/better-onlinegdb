@@ -3,9 +3,10 @@ import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import Docker from 'dockerode';
 
-interface SandboxResult {
+export interface SandboxResult {
     success: boolean;
-    status: 'COMPLETED' | 'COMPILATION_ERROR' | 'TIME_LIMIT_EXCEEDED' | 'MEMORY_LIMIT_EXCEEDED' | 'UNKNOWN_ERROR';
+    // Bổ sung thêm trạng thái SECURITY_VIOLATION cho tầng bảo mật quét tĩnh
+    status: 'COMPLETED' | 'COMPILATION_ERROR' | 'TIME_LIMIT_EXCEEDED' | 'MEMORY_LIMIT_EXCEEDED' | 'SECURITY_VIOLATION' | 'UNKNOWN_ERROR';
     stdout: string;
     stderr: string;
 }
@@ -68,8 +69,10 @@ export class DockerDriver {
             // ===== 2. GIAI ĐOẠN THỰC THI AN TOÀN (SANDBOX EXECUTION) =====
             const runContainer = await this.docker.createContainer({
                 Image: 'c-sandbox:latest',
+                // Chạy dưới quyền tài quyền khoản không có quyền root (sandbox_user) để chặn phá hoại hệ thống
+                User: 'sandbox_user', 
                 Cmd: ['sh', '-c', `timeout ${DockerDriver.TIMEOUT_LIMIT}s ./main < stdin.txt`],
-                NetworkDisabled: true, // Chặn hoàn toàn Internet để tránh mã độc tán phát
+                NetworkDisabled: true, // Chặn hoàn toàn Internet (Tương đương --network none)
                 HostConfig: {
                     Binds: [`${absoluteHostPath}:/app`],
                     Memory: DockerDriver.MEMORY_LIMIT,     // Cấu hình giới hạn RAM 64MB
@@ -80,30 +83,38 @@ export class DockerDriver {
             await runContainer.start();
             const runWait = await runContainer.wait();
 
+            // Truy vấn sâu vào trạng thái thực tế của container để bắt cờ OOMKilled từ Linux Kernel
+            const containerInfo = await runContainer.inspect();
+            const isOOMKilled = containerInfo.State.OOMKilled;
+
             // Đọc toàn bộ kết quả xuất ra màn hình (Stdout)
             const runLogs = await runContainer.logs({ stdout: true, stderr: true, follow: false }) as unknown as Buffer;
             const outputStr = this.parseDockerLogs(runLogs); // Loại bỏ header nhiễu tại đây
             await runContainer.remove(); // Xóa container chạy ngay lập tức
 
-            // Kiểm tra mã thoát (Exit code) để phát hiện Overtime hoặc Tràn RAM
+            // ====== KIỂM TRA MÃ THOÁT VÀ TÍN HIỆU NGẮT TÀI NGUYÊN (UC-08 & UC-09) ======
+            
+            // Trường hợp 1: Tràn bộ nhớ RAM (OOM Killer hoặc ExitCode 137 do Linux cưỡng ép ngắt)
+            if (isOOMKilled || runWait.StatusCode === 137) {
+                return {
+                    success: false,
+                    status: 'MEMORY_LIMIT_EXCEEDED',
+                    stdout: '',
+                    stderr: 'Error: Memory Limit Exceeded (Chương trình bị sập do chạy vượt quá giới hạn tài nguyên 64MB RAM cho phép).'
+                };
+            }
+
+            // Trường hợp 2: Chạy quá thời gian (ExitCode 124 do lệnh timeout phát SIGKILL)
             if (runWait.StatusCode === 124) {
                 return {
                     success: false,
                     status: 'TIME_LIMIT_EXCEEDED',
                     stdout: '',
-                    stderr: 'Error: Time Limit Exceeded (Chương trình chạy quá 2 giây).'
+                    stderr: 'Error: Time Limit Exceeded (Chương trình bị dừng cưỡng ép do chạy quá giới hạn thời gian 2 giây. Vui lòng kiểm tra lại vòng lặp vô hạn).'
                 };
             }
 
-            if (runWait.StatusCode === 137) {
-                return {
-                    success: false,
-                    status: 'MEMORY_LIMIT_EXCEEDED',
-                    stdout: '',
-                    stderr: 'Error: Memory Limit Exceeded (Chương trình chiếm dụng quá 64MB RAM).'
-                };
-            }
-
+            // Trường hợp 3: Hoàn thành chạy mượt mà
             return {
                 success: true,
                 status: 'COMPLETED',
@@ -134,8 +145,6 @@ export class DockerDriver {
         let offset = 0;
 
         while (offset < rawBuffer.length) {
-            // Header của Docker gồm 8 bytes: byte 0 là stream type (1 = stdout, 2 = stderr)
-            // Các byte từ 4-7 chứa độ dài (size) của đoạn text bằng kiểu UInt32 Big Endian
             if (offset + 8 > rawBuffer.length) break;
             const size = rawBuffer.readUInt32BE(offset + 4);
             offset += 8;
@@ -148,5 +157,72 @@ export class DockerDriver {
 
         return result.trim();
     }
+    /**
+     * Khởi chạy một phiên GDB tương tác ngầm bên trong Container qua WebSocket
+     * @param sourceCode Mã nguồn C cần gỡ lỗi
+     * @param onGdbOutput Callback hàm hứng dữ liệu thô xuất ra từ GDB
+     * @returns Trả về thực thể container và tiến trình thực thi để điều khiển ghi lệnh ngầm
+     */
+    public async executeGdbSession(
+        sourceCode: string, 
+        onGdbOutput: (data: string) => void
+    ): Promise<{ container: any; execStream: any }> {
+        const runId = uuidv4();
+        const hostProjectDir = path.join(DockerDriver.TMP_DIR, runId);
+        fs.mkdirSync(hostProjectDir, { recursive: true });
 
+        // 1. Ghi file code main.c ra bộ nhớ tạm
+        fs.writeFileSync(path.join(hostProjectDir, 'main.c'), sourceCode);
+        const absoluteHostPath = path.resolve(hostProjectDir);
+
+        // 2. Biên dịch đặc biệt kèm cờ gỡ lỗi "-g" để nạp bảng biểu ký hiệu (Symbol Table)
+        const compileContainer = await this.docker.createContainer({
+            Image: 'c-sandbox:latest',
+            Cmd: ['gcc', '-g', 'main.c', '-o', 'main_debug'], // Thêm cờ -g để debug [cite: 106]
+            HostConfig: { Binds: [`${absoluteHostPath}:/app`] },
+        });
+        await compileContainer.start();
+        const compileWait = await compileContainer.wait();
+
+        if (compileWait.StatusCode !== 0) {
+            const logs = await compileContainer.logs({ stdout: true, stderr: true });
+            await compileContainer.remove();
+            throw new Error(`Lỗi biên dịch Debug:\n${logs.toString('utf8')}`);
+        }
+        await compileContainer.remove();
+
+        // 3. Khởi tạo container chạy duy trì trạng thái ngầm (Stateful)
+        const runContainer = await this.docker.createContainer({
+            Image: 'c-sandbox:latest',
+            User: 'sandbox_user', // Chạy dưới quyền user thường an toàn [cite: 97]
+            Cmd: ['sleep', '3600'], // Giữ container sống trong 1 tiếng để debug [cite: 127]
+            NetworkDisabled: true, // Chặn Internet bảo mật [cite: 97]
+            HostConfig: {
+                Binds: [`${absoluteHostPath}:/app`],
+                Memory: DockerDriver.MEMORY_LIMIT,
+            },
+        });
+        await runContainer.start();
+
+        // 4. Kích hoạt tiến trình GDB MI ngầm bên trong container
+        const execInstance = await runContainer.exec({
+            Cmd: ['gdb', '--interpreter=mi2', './main_debug'], // Gọi trình thông dịch máy mi2 [cite: 107]
+            AttachStdout: true,
+            AttachStderr: true,
+            AttachStdin: true,
+            Tty: false
+        });
+
+        const execStream = await execInstance.start({ hijack: true, stdin: true });
+
+        // Lắng nghe dữ liệu thô xuất ra liên tục từ GDB nhả về qua đường ống stream
+        execStream.on('data', (chunk: Buffer) => {
+            const cleanedData = this.parseDockerLogs(chunk);
+            if (cleanedData) {
+                onGdbOutput(cleanedData);
+            }
+        });
+
+        return { container: runContainer, execStream };
+    }
 }
