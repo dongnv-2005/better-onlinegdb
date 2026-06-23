@@ -8,16 +8,21 @@
     "dev": "nodemon --watch src --exec ts-node src/server.ts"
   },
   "dependencies": {
+    "@hono/node-server": "^2.0.4",
+    "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dockerode": "^5.0.0",
-    "express": "^5.2.1",
+    "hono": "^4.12.23",
+    "jsonwebtoken": "^9.0.3",
+    "mysql2": "^3.22.4",
     "socket.io": "^4.8.3",
     "uuid": "^14.0.0"
   },
   "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
     "@types/cors": "^2.8.19",
     "@types/dockerode": "^4.0.1",
-    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^20.12.12",
     "@types/uuid": "^10.0.0",
     "nodemon": "^3.1.0",

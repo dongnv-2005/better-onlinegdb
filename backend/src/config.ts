@@ -1,0 +1,1 @@
+export const JWT_SECRET = 'HUST_BachKhoa_BetterOnlineGDB_SecretKey_2026';

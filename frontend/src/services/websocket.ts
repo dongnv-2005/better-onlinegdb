@@ -7,7 +7,7 @@ export const getWebSocketService = (): Socket => {
   if (!socket) {
     // Khởi tạo kết nối Singleton duy nhất tới Backend
     socket = io(SOCKET_URL, {
-      autoConnect: false, // Để người dùng bấm nút Debug mới chủ động connect
+      autoConnect: false, 
     });
 
     socket.on('connect', () => {

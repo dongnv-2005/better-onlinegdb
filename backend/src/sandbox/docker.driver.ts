@@ -5,7 +5,6 @@ import Docker from 'dockerode';
 
 export interface SandboxResult {
     success: boolean;
-    // Bổ sung thêm trạng thái SECURITY_VIOLATION cho tầng bảo mật quét tĩnh
     status: 'COMPLETED' | 'COMPILATION_ERROR' | 'TIME_LIMIT_EXCEEDED' | 'MEMORY_LIMIT_EXCEEDED' | 'SECURITY_VIOLATION' | 'UNKNOWN_ERROR';
     stdout: string;
     stderr: string;
@@ -18,7 +17,7 @@ export class DockerDriver {
     private static MEMORY_LIMIT = 64 * 1024 * 1024; // Giới hạn 64MB RAM
 
     constructor() {
-        // Kết nối tới Docker Desktop trên Windows qua Named Pipe mặc định
+        // Kết nối tới Docker Desktop
         this.docker = new Docker({ socketPath: '//./pipe/docker_engine' });
 
         // Tự động tạo thư mục tmp nếu chưa có để làm nơi chứa code tạm thời
@@ -92,9 +91,9 @@ export class DockerDriver {
             const outputStr = this.parseDockerLogs(runLogs); // Loại bỏ header nhiễu tại đây
             await runContainer.remove(); // Xóa container chạy ngay lập tức
 
-            // ====== KIỂM TRA MÃ THOÁT VÀ TÍN HIỆU NGẮT TÀI NGUYÊN (UC-08 & UC-09) ======
+            // ====== KIỂM TRA MÃ THOÁT VÀ TÍN HIỆU NGẮT TÀI NGUYÊN ======
             
-            // Trường hợp 1: Tràn bộ nhớ RAM (OOM Killer hoặc ExitCode 137 do Linux cưỡng ép ngắt)
+            // Trường hợp 1: Tràn bộ nhớ RAM 
             if (isOOMKilled || runWait.StatusCode === 137) {
                 return {
                     success: false,
@@ -104,7 +103,7 @@ export class DockerDriver {
                 };
             }
 
-            // Trường hợp 2: Chạy quá thời gian (ExitCode 124 do lệnh timeout phát SIGKILL)
+            // Trường hợp 2: Chạy quá thời gian
             if (runWait.StatusCode === 124) {
                 return {
                     success: false,
@@ -178,7 +177,7 @@ export class DockerDriver {
         // 2. Biên dịch đặc biệt kèm cờ gỡ lỗi "-g" để nạp bảng biểu ký hiệu (Symbol Table)
         const compileContainer = await this.docker.createContainer({
             Image: 'c-sandbox:latest',
-            Cmd: ['gcc', '-g', 'main.c', '-o', 'main_debug'], // Thêm cờ -g để debug [cite: 106]
+            Cmd: ['gcc', '-g', 'main.c', '-o', 'main_debug'],
             HostConfig: { Binds: [`${absoluteHostPath}:/app`] },
         });
         await compileContainer.start();
@@ -194,9 +193,9 @@ export class DockerDriver {
         // 3. Khởi tạo container chạy duy trì trạng thái ngầm (Stateful)
         const runContainer = await this.docker.createContainer({
             Image: 'c-sandbox:latest',
-            User: 'sandbox_user', // Chạy dưới quyền user thường an toàn [cite: 97]
-            Cmd: ['sleep', '3600'], // Giữ container sống trong 1 tiếng để debug [cite: 127]
-            NetworkDisabled: true, // Chặn Internet bảo mật [cite: 97]
+            User: 'sandbox_user', 
+            Cmd: ['sleep', '3600'],  
+            NetworkDisabled: true, 
             HostConfig: {
                 Binds: [`${absoluteHostPath}:/app`],
                 Memory: DockerDriver.MEMORY_LIMIT,
@@ -206,7 +205,7 @@ export class DockerDriver {
 
         // 4. Kích hoạt tiến trình GDB MI ngầm bên trong container
         const execInstance = await runContainer.exec({
-            Cmd: ['gdb', '--interpreter=mi2', './main_debug'], // Gọi trình thông dịch máy mi2 [cite: 107]
+            Cmd: ['gdb', '--interpreter=mi2', './main_debug'],
             AttachStdout: true,
             AttachStderr: true,
             AttachStdin: true,

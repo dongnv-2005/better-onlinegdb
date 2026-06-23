@@ -1,43 +1,63 @@
-import express, { Request, Response } from 'express';
-import cors from 'cors';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { serve, getRequestListener } from '@hono/node-server';
+import { Server as SocketIOServer } from 'socket.io';
 import { createServer } from 'http';
-import { Server } from 'socket.io';
+import { AuthController } from './controllers/auth.controller';
+import { ProjectController } from './controllers/project.controller';
 import { DockerDriver } from './sandbox/docker.driver';
 import { SecurityGuard } from './sandbox/security.guard';
 import { GdbMiParser } from './sandbox/gdb.mi.parser';
 
-const app = express();
+const app = new Hono();
 
-app.use(cors({
+app.use('/api/*', cors({
   origin: 'http://localhost:5173',
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type']
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowHeaders: ['Content-Type'],
+  credentials: true
 }));
 
-app.use(express.json());
 const sandbox = new DockerDriver();
 
+// --- CÁC ENDPOINT ĐỊNH TUYẾN XÁC THỰC (PHÂN HỆ 5) ---
+app.post('/api/v1/auth/signup', AuthController.signup);
+app.post('/api/v1/auth/signin', AuthController.signin);
+app.post('/api/v1/auth/signout', AuthController.signout);
+
+// --- CÁC ENDPOINT QUẢN LÝ DỰ ÁN (PHÂN HỆ 6) ---
+app.post('/api/v1/projects', ProjectController.create);
+app.get('/api/v1/projects', ProjectController.list);
+app.get('/api/v1/projects/:id', ProjectController.getDetail);
+app.put('/api/v1/projects/:id', ProjectController.save);
+app.put('/api/v1/projects/:id/rename', ProjectController.rename);
+app.delete('/api/v1/projects/:id', ProjectController.delete);
+
 // --- ENDPOINT RUN CODE HTTP (STATELESS) ---
-app.post('/api/v1/sandbox/run', async (req: Request, res: Response) => {
-  const { sourceCode, stdin } = req.body;
-  if (!sourceCode) return res.status(400).json({ success: false, message: 'Thiếu mã nguồn C.' });
+app.post('/api/v1/sandbox/run', async (c) => {
+  const { sourceCode, stdin } = await c.req.json();
+  
+  if (!sourceCode) {
+    return c.json({ success: false, message: 'Thiếu mã nguồn C.' }, 400);
+  }
 
   const securityCheck = SecurityGuard.validateSourceCode(sourceCode);
   if (!securityCheck.isSafe) {
-    return res.status(422).json({ success: false, status: 'SECURITY_VIOLATION', stdout: '', stderr: securityCheck.reason });
+    return c.json({ success: false, status: 'SECURITY_VIOLATION', stdout: '', stderr: securityCheck.reason }, 422);
   }
 
   try {
     const result = await sandbox.executeCCode(sourceCode, stdin || '');
-    return res.status(result.success ? 200 : 422).json(result);
+    return c.json(result, result.success ? 200 : 422);
   } catch (error: any) {
-    return res.status(500).json({ success: false, message: error.message });
+    return c.json({ success: false, message: error.message }, 500);
   }
 });
 
-// ====== CẤU HÌNH HẠ TẦNG WEBSOCKET (GIAI ĐOẠN 4 - STATEFUL) ======
-const httpServer = createServer(app);
-const io = new Server(httpServer, {
+// ====== HẠ TẦNG WEBSOCKET (GIAI ĐOẠN 4 - STATEFUL DEBUGGER) ======
+const PORT = 5000;
+const httpServer = createServer(getRequestListener(app.fetch));
+const io = new SocketIOServer(httpServer, {
   cors: {
     origin: 'http://localhost:5173',
     methods: ['GET', 'POST']
@@ -45,55 +65,71 @@ const io = new Server(httpServer, {
 });
 
 io.on('connection', (socket) => {
-  console.log(`[WS] Có kết nối mới kết nối đến Debugger: ${socket.id}`);
-
+  console.log(`Có kết nối mới: ${socket.id}`);
   let activeContainer: any = null;
   let activeGdbStream: any = null;
 
-  // Kích hoạt phiên gỡ lỗi GDB (UC-11)
-  socket.on('START_DEBUG', async (payload: { sourceCode: string }) => {
-    console.log(`[WS] Nhận yêu cầu Debug code từ socket: ${socket.id}`);
-
+  // Hàm helper dùng chung để giải phóng an toàn tài nguyên container ngầm
+  const cleanUpDebugSession = async () => {
     if (activeContainer) {
       try {
         await activeContainer.stop();
         await activeContainer.remove();
       } catch (e) { }
+      activeContainer = null;
     }
+    activeGdbStream = null;
+  };
+
+  socket.on('START_DEBUG', async (payload: { sourceCode: string }) => {
+    console.log(`[Hono-WS] Nhận yêu cầu Debug từ socket: ${socket.id}`);
+    await cleanUpDebugSession(); // Làm sạch session cũ nếu có
 
     socket.emit('DEBUG_STATUS', { status: 'INITIALIZING', message: 'Đang biên dịch code -g và khởi tạo môi trường GDB...' });
 
     try {
-      const session = await sandbox.executeGdbSession(payload.sourceCode, (gdbRawOutput) => {
+      const session = await sandbox.executeGdbSession(payload.sourceCode, async (gdbRawOutput) => {
         console.log(`[GDB RAW]:\n${gdbRawOutput}`);
-
         const lines = gdbRawOutput.split('\n');
+        
         for (const line of lines) {
           const trimmedLine = line.trim();
 
-          // Kiểm tra sự kiện GDB dừng tiến trình (*stopped)
+          // 1. Tự động kiểm tra cờ kết thúc chương trình bình thường từ GDB MI
+          if (trimmedLine.startsWith('*stopped,reason="exited-normally"')) {
+            console.log('[Debugger] Chương trình gỡ lỗi đã chạy xong (exited-normally).');
+            await cleanUpDebugSession();
+            socket.emit('DEBUG_STATUS', { status: 'IDLE', message: 'Chương trình đã kết thúc và thoát bình thường.' });
+            return;
+          }
+
           const stoppedInfo = GdbMiParser.parseStopped(trimmedLine);
           if (stoppedInfo) {
-            socket.emit('DEBUG_STOPPED', stoppedInfo);
+            // BẮN SỰ KIỆN DEBUG_STOP TỰ ĐỘNG KHI THOÁT HÀM MAIN (HẠ CONTAINER)
+            if (stoppedInfo.func === '??' || !stoppedInfo.line) {
+              console.log('[Debugger] Con trỏ lọt vào vùng hệ thống (func="??"). Tự động dừng phiên.');
+              await cleanUpDebugSession();
+              socket.emit('DEBUG_STATUS', { status: 'IDLE', message: 'Chương trình gỡ lỗi đã hoàn thành và thoát bình thường.' });
+              return;
+            }
 
-            // UC-14: Tự động gửi lệnh ngầm lấy giá trị biến khi chương trình dừng
+            // Nếu con trỏ vẫn nằm ở các dòng code C hợp lệ thì bắn số dòng về UI bôi màu
+            socket.emit('DEBUG_STOPPED', stoppedInfo);
             if (activeGdbStream) {
               activeGdbStream.write('-stack-list-locals --simple-values\n');
             }
           }
 
-          // Hứng kết quả trả về của danh sách biến cục bộ từ GDB
           if (trimmedLine.startsWith('^done,locals=')) {
             const parsedVariables = GdbMiParser.parseLocals(trimmedLine);
             socket.emit('DEBUG_VARIABLES', parsedVariables);
           }
 
-          // UC-15: Phát hiện và xử lý lỗi Runtime Crash
           if (trimmedLine.includes('reason="signal-received"')) {
             if (trimmedLine.includes('signal-name="SIGFPE"')) {
-              socket.emit('DEBUG_STATUS', { status: 'ERROR', message: '❌ Chương trình bị sập do lỗi chia cho số 0 (Floating Point Exception)!' });
+              socket.emit('DEBUG_STATUS', { status: 'ERROR', message: 'Chương trình bị sập do lỗi chia cho số 0!' });
             } else if (trimmedLine.includes('signal-name="SIGSEGV"')) {
-              socket.emit('DEBUG_STATUS', { status: 'ERROR', message: '❌ Chương trình bị sập do truy cập sai vùng nhớ/con trỏ lậu (Segmentation Fault)!' });
+              socket.emit('DEBUG_STATUS', { status: 'ERROR', message: 'Chương trình bị sập do truy cập sai vùng nhớ!' });
             }
           }
         }
@@ -101,21 +137,14 @@ io.on('connection', (socket) => {
 
       activeContainer = session.container;
       activeGdbStream = session.execStream;
-
       socket.emit('DEBUG_STATUS', { status: 'READY', message: 'Môi trường Debug đã sẵn sàng!' });
-
-      // 🌟 KHẮC PHỤC ĐÓNG BĂNG: Găm một điểm dừng tạm thời tại hàm main trước khi chạy
       activeGdbStream.write('-break-insert main\n');
-
-      // Sau đó mới kích hoạt chạy tiến trình để nó dừng ngay tại đầu hàm main chờ lệnh người dùng
       activeGdbStream.write('-exec-run\n');
-
     } catch (error: any) {
       socket.emit('DEBUG_STATUS', { status: 'ERROR', message: error.message || 'Không thể kết nối trình gỡ lỗi GDB.' });
     }
   });
 
-  // Điều khiển luồng Debugger (UC-13)
   socket.on('DEBUG_STEP_OVER', () => {
     if (activeGdbStream) activeGdbStream.write('-exec-next\n');
   });
@@ -124,36 +153,22 @@ io.on('connection', (socket) => {
     if (activeGdbStream) activeGdbStream.write('-exec-continue\n');
   });
 
-  socket.on('DEBUG_STOP', async () => {
-    if (activeContainer) {
-      try {
-        await activeContainer.stop();
-        await activeContainer.remove();
-        activeContainer = null;
-        activeGdbStream = null;
-        socket.emit('DEBUG_STATUS', { status: 'IDLE', message: 'Đã đóng trình gỡ lỗi.' });
-      } catch (e) { }
-    }
-  });
   socket.on('DEBUG_STEP_INTO', () => {
-    if (activeGdbStream) {
-      console.log(`[WS] Thực thi lệnh: Step Into (-exec-step)`);
-      activeGdbStream.write('-exec-step\n');
-    }
+    if (activeGdbStream) activeGdbStream.write('-exec-step\n');
+  });
+
+  socket.on('DEBUG_STOP', async () => {
+    console.log(`[Debugger] Nhận lệnh dừng gỡ lỗi chủ động từ client: ${socket.id}`);
+    await cleanUpDebugSession();
+    socket.emit('DEBUG_STATUS', { status: 'IDLE', message: 'Đã đóng trình gỡ lỗi.' });
   });
 
   socket.on('disconnect', async () => {
-    console.log(`[WS] Socket đóng kết nối: ${socket.id}`);
-    if (activeContainer) {
-      try {
-        await activeContainer.stop();
-        await activeContainer.remove();
-      } catch (e) { }
-    }
+    console.log(`Socket đóng kết nối: ${socket.id}`);
+    await cleanUpDebugSession();
   });
 });
 
-const PORT = 5000;
 httpServer.listen(PORT, () => {
-  console.log(`[OK] Better-OnlineGDB đang chạy tại port ${PORT}`);
+  console.log(`[🔥 OK] Better-OnlineGDB đang chạy tại port ${PORT}`);
 });
