@@ -44,10 +44,8 @@ export default function App() {
     const [activeProjectId, setActiveProjectId] = useState<number | null>(null);
     const [activeProjectName, setActiveProjectName] = useState<string>('');
 
-    // BẬT ĐÈN VÀNG: Biến tham chiếu lưu vết ID lớp bôi màu cũ để dọn dẹp, chống trùng lặp dòng
     const debugDecorationsRef = useRef<string[]>([]);
 
-    // Hàm dọn sạch vệt bôi màu vàng của Monaco Editor khi kết thúc hoặc chuyển dòng
     const clearDebugDecorations = (editor: any) => {
         if (editor && debugDecorationsRef.current.length > 0) {
             editor.deltaDecorations(debugDecorationsRef.current, []);
@@ -80,7 +78,7 @@ export default function App() {
                     editorInstance.revealLineInCenter(stoppedInfo.line);
                     editorInstance.setPosition({ lineNumber: stoppedInfo.line, column: 1 });
 
-                    // CƠ CHẾ BÔI MÀU CHUẨN (MONACO DECORATIONS API) - CHỐNG TRÔI LỆCH DÒNG
+                    // CƠ CHẾ BÔI MÀU
                     const newDecorations = [
                         {
                             range: {

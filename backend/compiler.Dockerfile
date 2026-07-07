@@ -1,10 +1,12 @@
 FROM alpine:3.18
 
-# Cài đặt gcc, libc-dev và coreutils (để có lệnh timeout chuẩn)
-RUN apk add --no-cache gcc libc-dev coreutils gdb
+# Cài đặt các công cụ biên dịch, gỡ lỗi và clangd 
+RUN apk add --no-cache gcc libc-dev coreutils gdb clang-extra-tools bash
 
-# Tạo user không có quyền root để chạy an toàn
+WORKDIR /app
+
 RUN adduser -D -u 1001 sandbox_user
 
+RUN chown -R sandbox_user:sandbox_user /app
+
 USER sandbox_user
-WORKDIR /app
