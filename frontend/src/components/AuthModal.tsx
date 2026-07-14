@@ -1,19 +1,23 @@
 import React, { useState } from 'react';
-import { signinUser, signupUser } from '../services/api';
+import { signinUser, signupUser, changePasswordUser } from '../services/api';
 
 interface AuthModalProps {
   isOpen: boolean;
   onClose: () => void;
   onAuthSuccess: (user: any) => void;
+  currentUser?: string; // Nhận username của người dùng đang đăng nhập nếu có
 }
 
-export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onAuthSuccess }) => {
+export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onAuthSuccess, currentUser }) => {
   if (!isOpen) return null;
 
-  const [isLoginView, setIsLoginView] = useState(true);
-  const [username, setUsername] = useState('');
+  // Chuyển view sang string để gánh thêm tính năng changepass
+  const [viewState, setViewState] = useState<'login' | 'signup' | 'changepass'>('login');
+  const [username, setUsername] = useState(currentUser || '');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [oldPassword, setOldPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
@@ -22,8 +26,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onAuthSuc
     setErrorMsg('');
     setSuccessMsg('');
 
-    if (isLoginView) {
-      // Xử lý logic Đăng nhập (UC-17)
+    if (viewState === 'login') {
       const res = await signinUser({ username, password });
       if (res.success && res.user) {
         onAuthSuccess(res.user);
@@ -31,13 +34,27 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onAuthSuc
       } else {
         setErrorMsg(res.message);
       }
-    } else {
-      // Xử lý logic Đăng ký (UC-16)
+    } else if (viewState === 'signup') {
       const res = await signupUser({ username, email, password });
       if (res.success) {
         setSuccessMsg('🎉 Đăng ký thành công! Hãy đăng nhập.');
-        setIsLoginView(true);
+        setViewState('login');
         setEmail('');
+      } else {
+        setErrorMsg(res.message);
+      }
+    } else if (viewState === 'changepass') {
+      const targetUser = currentUser || username;
+      if (!targetUser) {
+        setErrorMsg('Vui lòng điền tên tài khoản cần đổi mật khẩu.');
+        return;
+      }
+      const res = await changePasswordUser({ username: targetUser, oldPassword, newPassword });
+      if (res.success) {
+        setSuccessMsg('🎉 Đổi mật khẩu thành công! Hãy đăng nhập lại.');
+        setViewState('login');
+        setOldPassword('');
+        setNewPassword('');
       } else {
         setErrorMsg(res.message);
       }
@@ -48,24 +65,31 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onAuthSuc
     <div style={styles.overlay}>
       <div style={styles.modal}>
         <div style={styles.header}>
-          <h2>{isLoginView ? 'Đăng nhập hệ thống' : 'Đăng ký tài khoản'}</h2>
+          <h2>
+            {viewState === 'login' && 'Đăng nhập hệ thống'}
+            {viewState === 'signup' && 'Đăng ký tài khoản'}
+            {viewState === 'changepass' && 'Đổi mật khẩu tài khoản'}
+          </h2>
           <button onClick={onClose} style={styles.closeBtn}>&times;</button>
         </div>
 
         <form onSubmit={handleSubmit} style={styles.form}>
+          {/* Ô Tài khoản luôn xuất hiện hoặc tự động khóa nếu đã đăng nhập */}
           <div style={styles.inputGroup}>
             <label style={styles.label}>Tài khoản</label>
             <input 
               type="text" 
-              value={username} 
+              value={currentUser || username} 
               onChange={(e) => setUsername(e.target.value)} 
               placeholder="Nhập tên tài khoản (5-20 ký tự)"
               style={styles.input} 
+              disabled={!!currentUser && viewState === 'changepass'}
               required 
             />
           </div>
 
-          {!isLoginView && (
+          {/* Trường dành riêng cho Đăng ký */}
+          {viewState === 'signup' && (
             <div style={styles.inputGroup}>
               <label style={styles.label}>Email</label>
               <input 
@@ -79,31 +103,67 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onAuthSuc
             </div>
           )}
 
-          <div style={styles.inputGroup}>
-            <label style={styles.label}>Mật khẩu</label>
-            <input 
-              type="password" 
-              value={password} 
-              onChange={(e) => setPassword(e.target.value)} 
-              placeholder="Nhập mật khẩu (tối thiểu 8 ký tự)"
-              style={styles.input} 
-              required 
-            />
-          </div>
+          {/* Trường dành cho Đăng ký / Đăng nhập thường */}
+          {viewState !== 'changepass' && (
+            <div style={styles.inputGroup}>
+              <label style={styles.label}>Mật khẩu</label>
+              <input 
+                type="password" 
+                value={password} 
+                onChange={(e) => setPassword(e.target.value)} 
+                placeholder="Nhập mật khẩu (tối thiểu 8 ký tự)"
+                style={styles.input} 
+                required 
+              />
+            </div>
+          )}
+
+          {/* Hai trường dành riêng cho Đổi mật khẩu */}
+          {viewState === 'changepass' && (
+            <>
+              <div style={styles.inputGroup}>
+                <label style={styles.label}>Mật khẩu cũ</label>
+                <input 
+                  type="password" 
+                  value={oldPassword} 
+                  onChange={(e) => setOldPassword(e.target.value)} 
+                  placeholder="Nhập mật khẩu đang sử dụng"
+                  style={styles.input} 
+                  required 
+                />
+              </div>
+              <div style={styles.inputGroup}>
+                <label style={styles.label}>Mật khẩu mới</label>
+                <input 
+                  type="password" 
+                  value={newPassword} 
+                  onChange={(e) => setNewPassword(e.target.value)} 
+                  placeholder="Nhập mật khẩu mới (tối thiểu 8 ký tự)"
+                  style={styles.input} 
+                  required 
+                />
+              </div>
+            </>
+          )}
 
           {errorMsg && <div style={styles.error}>{errorMsg}</div>}
           {successMsg && <div style={styles.success}>{successMsg}</div>}
 
           <button type="submit" style={styles.submitBtn}>
-            {isLoginView ? 'Đăng nhập' : 'Đăng ký'}
+            {viewState === 'login' && 'Đăng nhập'}
+            {viewState === 'signup' && 'Đăng ký'}
+            {viewState === 'changepass' && 'Xác nhận đổi'}
           </button>
         </form>
 
         <div style={styles.footer}>
-          {isLoginView ? (
-            <p>Chưa có tài khoản? <span onClick={() => { setIsLoginView(false); setErrorMsg(''); }} style={styles.switchLink}>Đăng ký ngay</span></p>
+          {viewState === 'login' ? (
+            <>
+              <p>Chưa có tài khoản? <span onClick={() => { setViewState('signup'); setErrorMsg(''); }} style={styles.switchLink}>Đăng ký ngay</span></p>
+              <p style={{ marginTop: '8px' }}><span onClick={() => { setViewState('changepass'); setErrorMsg(''); }} style={styles.switchLink}>Đổi mật khẩu?</span></p>
+            </>
           ) : (
-            <p>Đã có tài khoản? <span onClick={() => { setIsLoginView(true); setErrorMsg(''); }} style={styles.switchLink}>Đăng nhập ngay</span></p>
+            <p>Đã có tài khoản? <span onClick={() => { setViewState('login'); setErrorMsg(''); }} style={styles.switchLink}>Đăng nhập ngay</span></p>
           )}
         </div>
       </div>

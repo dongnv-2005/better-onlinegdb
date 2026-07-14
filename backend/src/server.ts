@@ -24,6 +24,7 @@ const sandbox = new DockerDriver();
 app.post('/api/v1/auth/signup', AuthController.signup);
 app.post('/api/v1/auth/signin', AuthController.signin);
 app.post('/api/v1/auth/signout', AuthController.signout);
+app.put('/api/v1/auth/change-password', AuthController.changePassword);
 
 // --- CÁC ENDPOINT QUẢN LÝ DỰ ÁN (PHÂN HỆ 6) ---
 app.post('/api/v1/projects', ProjectController.create);

@@ -52,7 +52,7 @@ export interface AuthResponse {
   };
 }
 
-// UC-16: Gọi API Đăng ký tài khoản
+// UC: Gọi API Đăng ký tài khoản
 export const signupUser = async (payload: AuthPayload): Promise<AuthResponse> => {
   try {
     const response = await api.post<AuthResponse>('/auth/signup', payload);
@@ -63,7 +63,7 @@ export const signupUser = async (payload: AuthPayload): Promise<AuthResponse> =>
   }
 };
 
-// UC-17: Gọi API Đăng nhập hệ thống
+// UC: Gọi API Đăng nhập hệ thống
 export const signinUser = async (payload: AuthPayload): Promise<AuthResponse> => {
   try {
     const response = await api.post<AuthResponse>('/auth/signin', payload);
@@ -93,7 +93,7 @@ export interface ProjectActionResponse {
   message: string;
 }
 
-// UC-19: Gọi API tạo dự án mới
+// UC: Gọi API tạo dự án mới
 export const createProject = async (name: string, sourceCode: string): Promise<ProjectActionResponse> => {
   try {
     const response = await api.post<ProjectActionResponse>('/projects', { name, sourceCode });
@@ -104,7 +104,7 @@ export const createProject = async (name: string, sourceCode: string): Promise<P
   }
 };
 
-// UC-21: Gọi API lấy danh sách dự án của User
+// UC: Gọi API lấy danh sách dự án của User
 export const fetchProjectsList = async (): Promise<ProjectListResponse> => {
   try {
     const response = await api.get<ProjectListResponse>('/projects');
@@ -115,7 +115,7 @@ export const fetchProjectsList = async (): Promise<ProjectListResponse> => {
   }
 };
 
-// UC-20: Gọi API lưu đè mã nguồn vào dự án hiện tại
+// UC: Gọi API lưu đè mã nguồn vào dự án hiện tại
 export const saveCurrentProject = async (projectId: number, sourceCode: string): Promise<ProjectActionResponse> => {
   try {
     const response = await api.put<ProjectActionResponse>(`/projects/${projectId}`, { sourceCode });
@@ -126,7 +126,7 @@ export const saveCurrentProject = async (projectId: number, sourceCode: string):
   }
 };
 
-// UC-22: Gọi API xóa dự án
+// UC: Gọi API xóa dự án
 export const deleteProject = async (projectId: number): Promise<ProjectActionResponse> => {
   try {
     const response = await api.delete<ProjectActionResponse>(`/projects/${projectId}`);
@@ -154,5 +154,22 @@ export const renameProject = async (projectId: number, newName: string): Promise
   } catch (error: any) {
     if (error.response && error.response.data) return error.response.data;
     return { success: false, message: 'Lỗi kết nối máy chủ khi đổi tên.' };
+  }
+};
+
+export interface ChangePasswordPayload {
+  username: string;
+  oldPassword?: string;
+  newPassword?: string;
+}
+
+// UC: Gọi API Đổi mật khẩu hệ thống
+export const changePasswordUser = async (payload: ChangePasswordPayload): Promise<AuthResponse> => {
+  try {
+    const response = await api.put<AuthResponse>('/auth/change-password', payload);
+    return response.data;
+  } catch (error: any) {
+    if (error.response && error.response.data) return error.response.data;
+    return { success: false, message: 'Không thể kết nối đến máy chủ Backend.' };
   }
 };

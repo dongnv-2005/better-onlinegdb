@@ -7,7 +7,7 @@ import { JWT_SECRET } from '../config';
 
 export class AuthController {
   
-  // --- UC-16: ĐĂNG KÝ TÀI KHOẢN ---
+  // --- UC: ĐĂNG KÝ TÀI KHOẢN ---
   static async signup(c: Context) {
     const { username, email, password } = await c.req.json();
 
@@ -48,7 +48,7 @@ export class AuthController {
     }
   }
 
-  // --- UC-17: ĐĂNG NHẬP HỆ THỐNG ---
+  // --- UC: ĐĂNG NHẬP HỆ THỐNG ---
   static async signin(c: Context) {
     const { username, password } = await c.req.json();
 
@@ -100,7 +100,7 @@ export class AuthController {
   }
 
   // =========================================================================
-  // UC-18: ĐĂNG XUẤT HỆ THỐNG (Đã sửa thành Static Method chuẩn Class)
+  // UC: ĐĂNG XUẤT HỆ THỐNG (Đã sửa thành Static Method chuẩn Class)
   // =========================================================================
   static async signout(c: Context) {
     try {
@@ -123,4 +123,49 @@ export class AuthController {
       }, 500);
     }
   }
+  static async changePassword(c: Context) {
+    const { username, oldPassword, newPassword } = await c.req.json();
+
+    if (!username || !oldPassword || !newPassword) {
+      return c.json({ success: false, message: 'Vui lòng điền đầy đủ thông tin.' }, 400);
+    }
+
+    if (newPassword.length < 8) {
+      return c.json({ success: false, message: 'Mật khẩu mới phải tối thiểu 8 ký tự.' }, 400);
+    }
+
+    try {
+      // 1. Lấy thông tin user hiện tại từ DB
+      const [rows]: any = await db.execute(
+        'SELECT * FROM users WHERE username = ?',
+        [username]
+      );
+
+      if (rows.length === 0) {
+        return c.json({ success: false, message: 'Không tìm thấy thông tin tài khoản.' }, 404);
+      }
+
+      const user = rows[0];
+
+      // 2. Kiểm tra mật khẩu cũ xem đúng không
+      const isPasswordValid = await bcrypt.compare(oldPassword, user.password);
+      if (!isPasswordValid) {
+        return c.json({ success: false, message: 'Mật khẩu cũ không chính xác.' }, 401);
+      }
+
+      // 3. Băm mật khẩu mới và cập nhật lại vào DB
+      const saltRounds = 10;
+      const hashedNewPassword = await bcrypt.hash(newPassword, saltRounds);
+
+      await db.execute(
+        'UPDATE users SET password = ? WHERE username = ?',
+        [hashedNewPassword, username]
+      );
+
+      return c.json({ success: true, message: '🎉 Đổi mật khẩu tài khoản thành công!' }, 200);
+    } catch (error: any) {
+      return c.json({ success: false, message: 'Lỗi hệ thống: ' + error.message }, 500);
+    }
+  }
+
 }
